@@ -2,6 +2,7 @@ var _ = require("underscore");
 var applicationinsights = require("applicationinsights");
 
 var telemetry = process.env["ApplicationInsightsInstrumentationKey"] ? new applicationinsights.TelemetryClient(process.env["ApplicationInsightsInstrumentationKey"]) : null;
+var config = require("./config.json"); // was used below without being imported
 
 var utils = require("./utils");
 const sleep = require("util").promisify(setTimeout);

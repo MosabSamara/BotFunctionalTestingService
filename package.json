@@ -17,6 +17,7 @@
   "dependencies": {
     "applicationinsights": "^1.0.3",
     "chai": "^4.1.2",
+    "chai-http": "^4.3.0",
     "deep-object-diff": "^1.0.4",
     "request": "^2.83.0",
     "request-promise": "^4.2.2",
