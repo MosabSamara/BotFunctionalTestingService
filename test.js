@@ -38,6 +38,7 @@ async function test(context, testData) {
         testData.trialsCount = -1;
         testData.prevTrialsCount = -1;
         testData.decreasedAtLeastOnce = false;
+        testData.testEnded = false;
         var conversationResult = await testConversation(context, testUserId, conversationSteps, initResult.conversationId, testData);
         var message = `${getTestTitle(testData)} passed successfully (${conversationResult.count} ${conversationResult.count == 1 ? "step" : "steps"} passed)`;
         return new Result(true, message);
@@ -88,6 +89,12 @@ function conversationStep(message) {
     this.userMessage = message;
     this.botReplies = [];
 }
+
+function checkIfConversationEnded(testData) {
+    return testData.lastMessageFromBot && testData.lastMessageFromBot.hasOwnProperty("text") &&
+        (testData.lastMessageFromBot.text.trim().includes('Thank you for using this service for COVID-19 Clinical Trials Matching.') ||
+            testData.lastMessageFromBot.text.trim() === 'Here are the clinical trials the patient may qualify for:')
+}
 function testConversation(context, testUserId, conversationSteps, conversationId, testData) {
     context.log("testConversation started");
     context.log("testUserId: " + testUserId);
@@ -97,12 +104,21 @@ function testConversation(context, testUserId, conversationSteps, conversationId
     return new Promise(function (resolve, reject) {
         var index = 0;
         function nextStep() {
-            if (index < conversationSteps.length) {
+            if (!testData.testEnded) {
                 context.log("Testing conversation step " + index);
-                var stepData = conversationSteps[index];
+                var stepData = {};
+                if (checkIfConversationEnded(testData)) {
+                    testData.testEnded = true;
+                    stepData.userMessage = testData.lastMessageFromBot;
+                }
+                else {
+                    stepData.userMessage = testData.lastMessageFromBot;
+                }
+                if (index < conversationSteps.length)
+                    stepData = conversationSteps[index];
                 index++;
                 var userMessage = createUserMessage(stepData.userMessage, testUserId);
-                return testStep(context, conversationId, userMessage, stepData.botReplies, testData, index >= conversationSteps.length).then(nextStep, reject);
+                return testStep(context, conversationId, userMessage, stepData.botReplies, testData).then(nextStep, reject);
             }
             else {
                 context.log("testConversation end");
@@ -122,20 +138,47 @@ function createUserMessage(message, testUserId) {
     return userMessage;
 }
 
-function testStep(context, conversationId, userMessage, expectedReplies, testData, isLastStep) {
+function isLastStep(message) {
+    return message && message.hasOwnProperty("text") &&
+        message.text.trim() === 'What would you like to do?' &&
+        message.hasOwnProperty("attachments") &&
+        message.attachments[0].content.buttons[0].title === 'Answer additional questions';
+}
+function isNumericQuestion(lastMessageFromBot) {
+    let numericQuestions = /^([Ww]hat is the patient's).*\?/g;
+    return lastMessageFromBot && lastMessageFromBot.hasOwnProperty("text") &&
+        numericQuestions.exec(lastMessageFromBot.text) &&
+        lastMessageFromBot.text != "What is the patient's condition?"
+}
+
+function isChoicesQuestion(lastMessageFromBot) {
+    let yesNoQuestionRegex = /^([Ww]as|[Dd]id|[Ww]hat is the patient's ECOG score|[Ii]s).*\?/g;
+    return lastMessageFromBot &&
+        lastMessageFromBot.hasOwnProperty("text") &&
+        yesNoQuestionRegex.exec(lastMessageFromBot.text)
+}
+
+function testStep(context, conversationId, userMessage, expectedReplies, testData) {
     context.log("testStep started");
     context.log("conversationId: " + conversationId);
     context.log("userMessage: " + utils.stringify(userMessage));
     context.log("expectedReplies: " + utils.stringify(expectedReplies));
     context.log("timeoutMilliseconds: " + testData.timeout);
+    if (testData && testData.lastMessageFromBot && isLastStep(testData.lastMessageFromBot))
+        userMessage.text = "2"; // 2 equals 'Get Results'
+    else if (isChoicesQuestion(testData.lastMessageFromBot))
+        userMessage.text = "1"; // first choice
+    else if (isNumericQuestion(testData.lastMessageFromBot))
+        userMessage.text = "20";
+
     return directline.sendMessage(conversationId, userMessage)
         .then(function (response) {
-            var nMessages = expectedReplies.hasOwnProperty("length") ? expectedReplies.length : 1;
+            var nMessages = (expectedReplies && expectedReplies.hasOwnProperty("length")) ? expectedReplies.length : 1;
             var bUserMessageIncluded = response != null;
             return directline.pollMessages(conversationId, nMessages, bUserMessageIncluded, testData.timeout);
         })
         .then(function (messages) {
-            return compareMessages(context, userMessage, expectedReplies, messages, testData, isLastStep);
+            return compareMessages(context, userMessage, expectedReplies, messages, testData);
         })
         .catch(function (err) {
             var message = `User message '${userMessage.text}' response failed - ${err.message}`;
@@ -161,7 +204,7 @@ function assertThatCardsFieldsAreNotEmpty(card) {
     }
 }
 
-function compareMessages(context, userMessage, expectedReplies, actualMessages, testData, isLastStep) {
+function compareMessages(context, userMessage, expectedReplies, actualMessages, testData) {
     context.log("compareMessages started");
     context.log("actualMessages: " + utils.stringify(actualMessages));
     // Filter out messages from the (test) user, leaving only bot replies
@@ -169,8 +212,7 @@ function compareMessages(context, userMessage, expectedReplies, actualMessages, 
         function (message) {
             return message.from.id == userMessage.from.id;
         });
-
-    // expect(botReplies, `reply to user message '${userMessage.text}'`).to.have.lengthOf(expectedReplies.length);
+    testData.lastMessageFromBot = botReplies.reverse().find(message => message.text != undefined);
     for (let i = 0; i < expectedReplies.length; i++) {
         var botReply = botReplies[i];
         var trialsCountRegex = /Found \d+ relevant trials/g;
@@ -190,6 +232,10 @@ function compareMessages(context, userMessage, expectedReplies, actualMessages, 
                     testData.prevTrialsCount = testData.trialsCount;
                 }
                 else {
+                    if (checkIfConversationEnded(testData)) {
+                        testData.testEnded = true;
+                        expect(testData.decreasedAtLeastOnce, "Trials count didn't decrease").to.be.true;
+                    }
                     expect(botReply.text, "The bot replied with empty text").to.not.be.empty;
                 }
             }
@@ -197,7 +243,7 @@ function compareMessages(context, userMessage, expectedReplies, actualMessages, 
         if (botReply.hasOwnProperty("attachments")) {
             try {
                 assertThatCardsFieldsAreNotEmpty(botReply.attachments);
-                if (isLastStep) {
+                if (testData.testEnded) {
                     expect(botReply.attachments[0].content.body.length, "Final trials count is ZERO").to.be.greaterThan(0);
                 }
             }
@@ -207,12 +253,6 @@ function compareMessages(context, userMessage, expectedReplies, actualMessages, 
                 throw exception;
             }
         }
-    }
-    if (isLastStep) {
-        expect(testData.decreasedAtLeastOnce, "Trials count didn't decrease").to.be.true;
-        testData.trialsCount = -1;
-        testData.prevTrialsCount = -1;
-        testData.decreasedAtLeastOnce = false;
     }
     return true;
 }
